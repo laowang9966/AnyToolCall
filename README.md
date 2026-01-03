@@ -15,7 +15,7 @@
 |------|----------|
 | **Gemini** | 相同 role 的消息不能连续出现 |
 | **Claude** | tool_call 必须紧跟 tool_result，ID 必须对齐 |
-| **Gemini 2.5** | tool_call 必须附带思维链签名 |
+| **Gemini 3** | tool_call 必须附带思维链签名 |
 | **某些模型** | 压根不支持 function calling |
 | **OpenAI 兼容层** | 各种奇怪的 400 错误 |
 
