@@ -4,20 +4,18 @@
 //
 // Run:
 //   npm i express
-//   ALLOW_LOCAL_NET=true node tool-proxy.js
+//   node tool-proxy.js
 //
 // Env:
 //   PORT=3000
 //   LOG_ENABLED=true|false (default false)
 //   LOG_DIR=./logs
-//   ALLOW_LOCAL_NET=true|false (default false)  <-- SSRF protection
 
 'use strict';
 const { Transform } = require('stream');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const dns = require('dns').promises;
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -60,23 +58,7 @@ class RequestLogger {
   }
 }
 
-// ============ SSRF protection ============
-const ALLOW_LOCAL_NET = process.env.ALLOW_LOCAL_NET === 'true';
-
-function isPrivateIPv4(ip) {
-  const parts = ip.split('.').map((n) => Number(n));
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
-
-  const [a, b] = parts;
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 0) return true;
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  return false;
-}
-
+// ============ URL validation ============
 async function validateUpstream(upstreamUrl) {
   if (!upstreamUrl) return { ok: false, error: 'Missing upstream URL' };
 
@@ -89,27 +71,6 @@ async function validateUpstream(upstreamUrl) {
 
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     return { ok: false, error: 'Invalid protocol (http/https only)' };
-  }
-
-  if (ALLOW_LOCAL_NET) return { ok: true };
-
-  const hostname = parsed.hostname;
-
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') {
-    return { ok: false, error: 'Localhost denied (set ALLOW_LOCAL_NET=true to allow)' };
-  }
-
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) && isPrivateIPv4(hostname)) {
-    return { ok: false, error: 'Private IPv4 denied (set ALLOW_LOCAL_NET=true to allow)' };
-  }
-
-  try {
-    const { address } = await dns.lookup(hostname);
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(address) && isPrivateIPv4(address)) {
-      return { ok: false, error: 'DNS resolved to private IPv4 denied (set ALLOW_LOCAL_NET=true to allow)' };
-    }
-  } catch {
-    // DNS lookup failed -> let fetch fail upstream; do not block here to avoid breaking custom DNS
   }
 
   return { ok: true };
@@ -788,7 +749,6 @@ app.listen(PORT, () => {
 ║               🚀 AnyToolCall Proxy Started            ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Port: ${String(PORT).padEnd(47)}║
-║  Local Net: ${(ALLOW_LOCAL_NET ? 'ALLOWED (unsafe)' : 'BLOCKED (safe)').padEnd(42)}║
 ║  Logging: ${(LOG_ENABLED ? `ENABLED -> ${LOG_DIR}` : 'DISABLED').padEnd(44)}║
 ╠═══════════════════════════════════════════════════════╣
 ║  Usage: POST http://localhost:${PORT}/{upstream_url}       ║
