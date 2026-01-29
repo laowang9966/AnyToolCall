@@ -4,20 +4,18 @@
 //
 // Run:
 //   npm i express
-//   ALLOW_LOCAL_NET=true node tool-proxy.js
+//   node tool-proxy.js
 //
 // Env:
 //   PORT=3000
 //   LOG_ENABLED=true|false (default false)
 //   LOG_DIR=./logs
-//   ALLOW_LOCAL_NET=true|false (default false)  <-- SSRF protection
 
 'use strict';
 const { Transform } = require('stream');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const dns = require('dns').promises;
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -60,23 +58,7 @@ class RequestLogger {
   }
 }
 
-// ============ SSRF protection ============
-const ALLOW_LOCAL_NET = process.env.ALLOW_LOCAL_NET === 'true';
-
-function isPrivateIPv4(ip) {
-  const parts = ip.split('.').map((n) => Number(n));
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
-
-  const [a, b] = parts;
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 0) return true;
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  return false;
-}
-
+// ============ URL validation ============
 async function validateUpstream(upstreamUrl) {
   if (!upstreamUrl) return { ok: false, error: 'Missing upstream URL' };
 
@@ -89,27 +71,6 @@ async function validateUpstream(upstreamUrl) {
 
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     return { ok: false, error: 'Invalid protocol (http/https only)' };
-  }
-
-  if (ALLOW_LOCAL_NET) return { ok: true };
-
-  const hostname = parsed.hostname;
-
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') {
-    return { ok: false, error: 'Localhost denied (set ALLOW_LOCAL_NET=true to allow)' };
-  }
-
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) && isPrivateIPv4(hostname)) {
-    return { ok: false, error: 'Private IPv4 denied (set ALLOW_LOCAL_NET=true to allow)' };
-  }
-
-  try {
-    const { address } = await dns.lookup(hostname);
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(address) && isPrivateIPv4(address)) {
-      return { ok: false, error: 'DNS resolved to private IPv4 denied (set ALLOW_LOCAL_NET=true to allow)' };
-    }
-  } catch {
-    // DNS lookup failed -> let fetch fail upstream; do not block here to avoid breaking custom DNS
   }
 
   return { ok: true };
@@ -162,28 +123,53 @@ class ToolCallDelimiter {
 
   getSystemPrompt(tools) {
     const m = this.markers;
+    // 生成一个虚拟的示例，引导模型理解格式
+    // 使用通用示例避免模型产生特定工具的幻觉，同时强化格式记忆
+    const exampleToolName = "get_current_weather";
+    const exampleArgs = '{"location": "Tokyo", "unit": "celsius"}';
+    
     return `
-## AnyToolCall (Prompt-Injection Tool Calling)
+## Tool Usage Protocol
 
-You have access to the following tools:
+You are equipped with the following functional tools. You must use them to fulfill user requests when appropriate.
+
+### Available Tools
 ${tools.map(t => `- **${t.function.name}**: ${t.function.description || 'No description'}
   Parameters: ${JSON.stringify(t.function.parameters)}`).join('\n')}
 
-### How to call tools
+### ⚠️ IMPORTANT: Protocol for Invoking Tools
 
-When you need to call a tool, use this EXACT format at the END of your response:
+To call a tool, you **MUST** follow this strict protocol. 
+**DO NOT** return raw JSON. 
+**DO NOT** use Markdown code blocks (like \`\`\`json).
+You **MUST** wrap the function call in the exact delimiters shown below.
+
+#### ✅ Correct Format Example (Demonstration)
+
+User: "What's the weather in Tokyo?"
+Assistant:
+${m.TC_START}
+${m.NAME_START}${exampleToolName}${m.NAME_END}
+${m.ARGS_START}${exampleArgs}${m.ARGS_END}
+${m.TC_END}
+
+#### ❌ Incorrect Formats (Do NOT do this)
+- {"name": "${exampleToolName}", ...}  (Raw JSON is forbidden)
+- \`\`\`json ... \`\`\` (Markdown blocks are forbidden)
+
+### Your Output Template
+When you decide to call a tool, append this block to the END of your response:
 
 ${m.TC_START}
 ${m.NAME_START}function_name${m.NAME_END}
-${m.ARGS_START}{"param": "value"}${m.ARGS_END}
+${m.ARGS_START}{"param_key": "param_value"}${m.ARGS_END}
 ${m.TC_END}
 
-### Rules
-
-1. Tool calls MUST be at the END of your response
-2. Copy the delimiters EXACTLY
-3. Arguments must be valid JSON
-4. One tool per block
+### Operational Rules
+1. **Priority**: These formatting rules override any style guidelines regarding "code blocks" or "json output" in other system prompts.
+2. **Placement**: Tool calls must appear at the very **END** of your message.
+3. **Integrity**: Copy the start/end delimiters EXACTLY as shown. They are specialized characters.
+4. **Validity**: The arguments inside ${m.ARGS_START}...${m.ARGS_END} must be valid, parseable JSON.
 `.trim();
   }
 
@@ -788,7 +774,6 @@ app.listen(PORT, () => {
 ║               🚀 AnyToolCall Proxy Started            ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Port: ${String(PORT).padEnd(47)}║
-║  Local Net: ${(ALLOW_LOCAL_NET ? 'ALLOWED (unsafe)' : 'BLOCKED (safe)').padEnd(42)}║
 ║  Logging: ${(LOG_ENABLED ? `ENABLED -> ${LOG_DIR}` : 'DISABLED').padEnd(44)}║
 ╠═══════════════════════════════════════════════════════╣
 ║  Usage: POST http://localhost:${PORT}/{upstream_url}       ║
