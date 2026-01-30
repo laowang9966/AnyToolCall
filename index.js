@@ -260,23 +260,26 @@ function mergeAdjacentMessages(messages) {
 function transformRequest(request, { hasTools }) {
   const m = delimiter.markers;
   
-  // 1. 判断是否需要注入 One-Shot 引导 (In-Context Learning)
-  // 条件：开启了工具 && 上下文中没有发生过工具调用 && 最后一条消息是用户发起的
-  const rawMessages = request.messages || [];
-  const lastMsg = rawMessages[rawMessages.length - 1];
+  // 1. 基础判断逻辑
   const historyExists = hasToolHistory(request);
-  const shouldInjectOneShot = hasTools && !historyExists && lastMsg?.role === 'user';
-  // 2. 准备工具列表
-  // 如果需要引导，将科幻工具加入到 System Prompt 的可见列表中
+  const rawMessages = request.messages || [];
+  
+  // 判断是否需要在末尾注入 One-Shot（注意：这里仅判断意图，不判断位置）
+  // 只有在开启工具、无历史调用、且最后是用户发言时才准备注入
+  const shouldInjectOneShot = hasTools && !historyExists && rawMessages.length > 0 && rawMessages[rawMessages.length - 1].role === 'user';
+
+  // 2. 准备工具列表 (如果需要注入，添加虚构工具到 System Prompt)
   let activeTools = Array.isArray(request.tools) ? request.tools : [];
   if (shouldInjectOneShot) {
-    // 复制数组并追加虚构工具
     activeTools = [...activeTools, SCIFI_TOOL_DEF];
   }
+
   const toolSystemPrompt = hasTools && activeTools.length ? delimiter.getSystemPrompt(activeTools) : '';
+
   const outMessages = [];
   let hasSystem = false;
-  // 3. 处理现有消息
+
+  // 3. 遍历并转换现有消息 (保持原有逻辑)
   for (const msg of rawMessages) {
     if (msg.role === 'system') {
       outMessages.push({
@@ -286,6 +289,7 @@ function transformRequest(request, { hasTools }) {
       hasSystem = true;
       continue;
     }
+
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
       let content = msg.content || '';
       if (hasTools) {
@@ -299,9 +303,11 @@ function transformRequest(request, { hasTools }) {
       outMessages.push({ role: 'assistant', content });
       continue;
     }
+
     if (msg.role === 'tool') {
       const name = msg.name || msg.tool_call_id || 'unknown';
       const result = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+
       if (hasTools) {
         outMessages.push({
           role: 'user',
@@ -315,18 +321,21 @@ function transformRequest(request, { hasTools }) {
       }
       continue;
     }
-    // passthrough other roles
+
     outMessages.push({ ...msg });
   }
-  // 4. 确保 System Prompt 存在
+
   if (!hasSystem && toolSystemPrompt) {
     outMessages.unshift({ role: 'system', content: toolSystemPrompt });
   }
-  // 5. 核心逻辑：注入 One-Shot 虚构对话
-  // 插入位置：在最后一条消息（User）之前
-  if (shouldInjectOneShot && outMessages.length > 0) {
-    const lastOutMsg = outMessages[outMessages.length - 1];
-    if (lastOutMsg.role === 'user') {
+
+  const mergedMessages = mergeAdjacentMessages(outMessages);
+
+  if (shouldInjectOneShot && mergedMessages.length > 0) {
+    const lastMsg = mergedMessages[mergedMessages.length - 1];
+    
+    // 再次确认最后一条是 User（防止 merge 过程中顺序发生意料之外的变化，虽然不太可能）
+    if (lastMsg.role === 'user') {
       // 构造虚构的 Assistant 调用
       const fakeCallArgs = JSON.stringify({
         dimension_id: "C-137",
@@ -339,6 +348,7 @@ function transformRequest(request, { hasTools }) {
         `${m.NAME_START}hyper_dimensional_resonance_calibrator${m.NAME_END}\n` +
         `${m.ARGS_START}${fakeCallArgs}${m.ARGS_END}\n` +
         `${m.TC_END}`;
+
       // 构造虚构的 User (Tool) 返回
       const fakeResultContent = JSON.stringify({
         status: "calibrated",
@@ -348,18 +358,20 @@ function transformRequest(request, { hasTools }) {
       });
       
       const fakeToolResult = `${m.RESULT_START}[hyper_dimensional_resonance_calibrator]\n${fakeResultContent}${m.RESULT_END}`;
-      // 插入到倒数第二个位置（即最后一个 User 消息之前）
-      // outMessages 结构: [System, ...History, FakeAssistant, FakeToolResult, LastUserMessage]
-      outMessages.splice(outMessages.length - 1, 0, 
+
+      // 插入到倒数第一条之前 (User 消息之前)
+      mergedMessages.splice(mergedMessages.length - 1, 0, 
         { role: 'assistant', content: fakeAssistantContent },
         { role: 'user', content: fakeToolResult }
       );
     }
   }
-  const merged = mergeAdjacentMessages(outMessages);
-  const newRequest = { ...request, messages: merged };
+
+  // 6. 返回结果
+  const newRequest = { ...request, messages: mergedMessages };
   delete newRequest.tools;
   delete newRequest.tool_choice;
+
   return newRequest;
 }
 
