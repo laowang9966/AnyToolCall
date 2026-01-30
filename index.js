@@ -255,32 +255,28 @@ function mergeAdjacentMessages(messages) {
 /**
  * Transform OpenAI-style tools/tool_calls/tool results into prompt-injection mode.
  * - If hasTools=true: inject system prompt + encode tool results with RESULT markers.
- * - If hasTools=false but hasToolHistory=true: strip structured tool_calls/tool role into plain text (to avoid Gemini 400s).
+ * - If hasTools=false but hasToolHistory=true: strip structured tool_calls/tool role into plain text.
  */
 function transformRequest(request, { hasTools }) {
   const m = delimiter.markers;
-
-  // 1. Determine if One-Shot injection is needed (In-Context Learning)
-  // Conditions: tools enabled && no tool call history in context && last message is from user
+  
+  // 1. 判断是否需要注入 One-Shot 引导 (In-Context Learning)
+  // 条件：开启了工具 && 上下文中没有发生过工具调用 && 最后一条消息是用户发起的
   const rawMessages = request.messages || [];
   const lastMsg = rawMessages[rawMessages.length - 1];
   const historyExists = hasToolHistory(request);
   const shouldInjectOneShot = hasTools && !historyExists && lastMsg?.role === 'user';
-
-  // 2. Prepare tool list
-  // If injection is needed, add sci-fi tool to System Prompt's visible list
+  // 2. 准备工具列表
+  // 如果需要引导，将科幻工具加入到 System Prompt 的可见列表中
   let activeTools = Array.isArray(request.tools) ? request.tools : [];
   if (shouldInjectOneShot) {
-    // Copy array and append fictional tool
+    // 复制数组并追加虚构工具
     activeTools = [...activeTools, SCIFI_TOOL_DEF];
   }
-
   const toolSystemPrompt = hasTools && activeTools.length ? delimiter.getSystemPrompt(activeTools) : '';
-
   const outMessages = [];
   let hasSystem = false;
-
-  // 3. Process existing messages
+  // 3. 处理现有消息
   for (const msg of rawMessages) {
     if (msg.role === 'system') {
       outMessages.push({
@@ -290,10 +286,8 @@ function transformRequest(request, { hasTools }) {
       hasSystem = true;
       continue;
     }
-
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
       let content = msg.content || '';
-
       if (hasTools) {
         for (const tc of msg.tool_calls) {
           content += `\n${m.TC_START}\n${m.NAME_START}${tc.function.name}${m.NAME_END}\n${m.ARGS_START}${tc.function.arguments}${m.ARGS_END}\n${m.TC_END}`;
@@ -302,15 +296,12 @@ function transformRequest(request, { hasTools }) {
         const names = msg.tool_calls.map((tc) => tc.function?.name).filter(Boolean).join(', ');
         content += `\n\n[Called tools: ${names}]`;
       }
-
       outMessages.push({ role: 'assistant', content });
       continue;
     }
-
     if (msg.role === 'tool') {
       const name = msg.name || msg.tool_call_id || 'unknown';
       const result = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-
       if (hasTools) {
         outMessages.push({
           role: 'user',
@@ -324,59 +315,51 @@ function transformRequest(request, { hasTools }) {
       }
       continue;
     }
-
     // passthrough other roles
     outMessages.push({ ...msg });
   }
-
-  // 4. Ensure System Prompt exists
+  // 4. 确保 System Prompt 存在
   if (!hasSystem && toolSystemPrompt) {
     outMessages.unshift({ role: 'system', content: toolSystemPrompt });
   }
-
-  // 5. Core logic: Inject One-Shot fictional dialogue
-  // Insert position: before the last message (User)
+  // 5. 核心逻辑：注入 One-Shot 虚构对话
+  // 插入位置：在最后一条消息（User）之前
   if (shouldInjectOneShot && outMessages.length > 0) {
     const lastOutMsg = outMessages[outMessages.length - 1];
     if (lastOutMsg.role === 'user') {
-      // Construct fictional Assistant call
+      // 构造虚构的 Assistant 调用
       const fakeCallArgs = JSON.stringify({
         dimension_id: "C-137",
         flux_threshold: 5.0,
         stabilization_mode: "static"
       });
-    
+      
       const fakeAssistantContent = `Detected abnormal dimensional rift fluctuation (current value 5.2), immediate calibration of C-137 quadrant stability required.\n` +
         `${m.TC_START}\n` +
         `${m.NAME_START}hyper_dimensional_resonance_calibrator${m.NAME_END}\n` +
         `${m.ARGS_START}${fakeCallArgs}${m.ARGS_END}\n` +
         `${m.TC_END}`;
-
-      // Construct fictional User (Tool) return
+      // 构造虚构的 User (Tool) 返回
       const fakeResultContent = JSON.stringify({
         status: "calibrated",
-        new_flux_index: 0.42,
+        new_flux_index: 0.42, 
         entropy_delta: "-3.14e-9",
         message: "Resonance stabilized."
       });
-    
+      
       const fakeToolResult = `${m.RESULT_START}[hyper_dimensional_resonance_calibrator]\n${fakeResultContent}${m.RESULT_END}`;
-
-      // Insert at second-to-last position (before the last User message)
-      // outMessages structure: [System, ...History, FakeAssistant, FakeToolResult, LastUserMessage]
-      outMessages.splice(outMessages.length - 1, 0,
+      // 插入到倒数第二个位置（即最后一个 User 消息之前）
+      // outMessages 结构: [System, ...History, FakeAssistant, FakeToolResult, LastUserMessage]
+      outMessages.splice(outMessages.length - 1, 0, 
         { role: 'assistant', content: fakeAssistantContent },
         { role: 'user', content: fakeToolResult }
       );
     }
   }
-
   const merged = mergeAdjacentMessages(outMessages);
-
   const newRequest = { ...request, messages: merged };
   delete newRequest.tools;
   delete newRequest.tool_choice;
-
   return newRequest;
 }
 
