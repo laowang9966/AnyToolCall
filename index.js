@@ -213,6 +213,24 @@ ${m.TC_END}
 
 const delimiter = new ToolCallDelimiter();
 
+// ============ SCIFI ONE-SHOT DEFINITION ============
+const SCIFI_TOOL_DEF = {
+  type: 'function',
+  function: {
+    name: 'hyper_dimensional_resonance_calibrator',
+    description: 'Calibrates cross-dimensional subspace resonance frequencies to stabilize the quantum flux of Einstein-Rosen bridges. Use only when dimensional rift fluctuation values exceed 5.0.',
+    parameters: {
+      type: 'object',
+      properties: {
+        dimension_id: { type: 'string', description: "Target dimension coordinates, e.g. 'C-137'" },
+        flux_threshold: { type: 'number', description: 'Maximum allowable flux fluctuation threshold' },
+        stabilization_mode: { type: 'string', enum: ['static', 'dynamic', 'hybrid'], default: 'static' },
+      },
+      required: ['dimension_id', 'flux_threshold'],
+    },
+  },
+};
+
 // ============ Request message transforms ============
 
 function mergeAdjacentMessages(messages) {
@@ -241,13 +259,29 @@ function mergeAdjacentMessages(messages) {
  */
 function transformRequest(request, { hasTools }) {
   const m = delimiter.markers;
-  const tools = Array.isArray(request.tools) ? request.tools : [];
-  const toolSystemPrompt = hasTools && tools.length ? delimiter.getSystemPrompt(tools) : '';
+
+  // 1. Determine if One-Shot injection is needed (In-Context Learning)
+  // Conditions: tools enabled && no tool call history in context && last message is from user
+  const rawMessages = request.messages || [];
+  const lastMsg = rawMessages[rawMessages.length - 1];
+  const historyExists = hasToolHistory(request);
+  const shouldInjectOneShot = hasTools && !historyExists && lastMsg?.role === 'user';
+
+  // 2. Prepare tool list
+  // If injection is needed, add sci-fi tool to System Prompt's visible list
+  let activeTools = Array.isArray(request.tools) ? request.tools : [];
+  if (shouldInjectOneShot) {
+    // Copy array and append fictional tool
+    activeTools = [...activeTools, SCIFI_TOOL_DEF];
+  }
+
+  const toolSystemPrompt = hasTools && activeTools.length ? delimiter.getSystemPrompt(activeTools) : '';
 
   const outMessages = [];
   let hasSystem = false;
 
-  for (const msg of request.messages || []) {
+  // 3. Process existing messages
+  for (const msg of rawMessages) {
     if (msg.role === 'system') {
       outMessages.push({
         role: 'system',
@@ -295,8 +329,46 @@ function transformRequest(request, { hasTools }) {
     outMessages.push({ ...msg });
   }
 
+  // 4. Ensure System Prompt exists
   if (!hasSystem && toolSystemPrompt) {
     outMessages.unshift({ role: 'system', content: toolSystemPrompt });
+  }
+
+  // 5. Core logic: Inject One-Shot fictional dialogue
+  // Insert position: before the last message (User)
+  if (shouldInjectOneShot && outMessages.length > 0) {
+    const lastOutMsg = outMessages[outMessages.length - 1];
+    if (lastOutMsg.role === 'user') {
+      // Construct fictional Assistant call
+      const fakeCallArgs = JSON.stringify({
+        dimension_id: "C-137",
+        flux_threshold: 5.0,
+        stabilization_mode: "static"
+      });
+    
+      const fakeAssistantContent = `Detected abnormal dimensional rift fluctuation (current value 5.2), immediate calibration of C-137 quadrant stability required.\n` +
+        `${m.TC_START}\n` +
+        `${m.NAME_START}hyper_dimensional_resonance_calibrator${m.NAME_END}\n` +
+        `${m.ARGS_START}${fakeCallArgs}${m.ARGS_END}\n` +
+        `${m.TC_END}`;
+
+      // Construct fictional User (Tool) return
+      const fakeResultContent = JSON.stringify({
+        status: "calibrated",
+        new_flux_index: 0.42,
+        entropy_delta: "-3.14e-9",
+        message: "Resonance stabilized."
+      });
+    
+      const fakeToolResult = `${m.RESULT_START}[hyper_dimensional_resonance_calibrator]\n${fakeResultContent}${m.RESULT_END}`;
+
+      // Insert at second-to-last position (before the last User message)
+      // outMessages structure: [System, ...History, FakeAssistant, FakeToolResult, LastUserMessage]
+      outMessages.splice(outMessages.length - 1, 0,
+        { role: 'assistant', content: fakeAssistantContent },
+        { role: 'user', content: fakeToolResult }
+      );
+    }
   }
 
   const merged = mergeAdjacentMessages(outMessages);
